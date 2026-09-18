@@ -359,7 +359,7 @@ def build_embed(current, planning):
     # =========================================================
 
     embed = {
-        "title": "📺 Eldriane's Anime Schedule",
+        "title": "📅 Release Schedule",
         "description": "AniList → Currently Watching + Planning",
         "fields": fields,
         "footer": {
