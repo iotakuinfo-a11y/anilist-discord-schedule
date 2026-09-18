@@ -2,6 +2,7 @@
 import os
 import time
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 import requests
 
@@ -10,9 +11,20 @@ ANILIST_API = "https://graphql.anilist.co"
 USERNAME = os.environ["ANILIST_USERNAME"]
 WEBHOOK_URL = os.environ["DISCORD_WEBHOOK_URL"]
 
+# Change this if you want "today" based on a different timezone.
+# Examples:
+#   Pacific/Honolulu
+#   America/Los_Angeles
+#   America/New_York
+#   Europe/London
+#   Asia/Tokyo
+DISPLAY_TIMEZONE = os.environ.get(
+    "DISPLAY_TIMEZONE",
+    "Pacific/Honolulu",
+)
+
+MAX_AIRED = 15
 MAX_UPCOMING = 15
-MAX_PLANNING_AIRED = 15
-MAX_PLANNING_UPCOMING = 15
 
 QUERY = """
 query ($userName: String, $status: MediaListStatus) {
@@ -33,7 +45,6 @@ query ($userName: String, $status: MediaListStatus) {
             english
           }
 
-          episodes
           siteUrl
 
           coverImage {
@@ -46,7 +57,10 @@ query ($userName: String, $status: MediaListStatus) {
             timeUntilAiring
           }
 
-          airingSchedule {
+          airingSchedule(
+            notYetAired: false
+            perPage: 25
+          ) {
             nodes {
               airingAt
               episode
@@ -58,6 +72,17 @@ query ($userName: String, $status: MediaListStatus) {
   }
 }
 """
+
+
+def get_timezone():
+    try:
+        return ZoneInfo(DISPLAY_TIMEZONE)
+    except Exception:
+        print(
+            f"Invalid timezone '{DISPLAY_TIMEZONE}'. "
+            "Falling back to UTC."
+        )
+        return timezone.utc
 
 
 def get_anime(status):
@@ -108,11 +133,8 @@ def get_anime(status):
     return list(unique.values())
 
 
-def get_all_anime():
-    current = get_anime("CURRENT")
-    planning = get_anime("PLANNING")
-
-    return current, planning
+def get_planning():
+    return get_anime("PLANNING")
 
 
 def anime_title(media):
@@ -135,207 +157,181 @@ def format_title(media):
     return title
 
 
-def discord_time(timestamp):
+def discord_relative_time(timestamp):
+    """
+    Discord automatically displays this as:
+      2 hours ago
+      5 minutes ago
+      in 3 hours
+      tomorrow
+      etc.
+    """
     return f"<t:{timestamp}:R>"
 
 
-def get_latest_aired_episode(media, now):
-    schedule = media.get("airingSchedule")
+def is_today(timestamp, tz):
+    """
+    Check whether an airing timestamp happened today
+    in the configured display timezone.
+    """
 
-    if not schedule:
-        return None
+    airing_date = datetime.fromtimestamp(
+        timestamp,
+        tz
+    ).date()
 
-    nodes = schedule.get("nodes") or []
+    today = datetime.now(tz).date()
 
-    aired = []
+    return airing_date == today
 
-    for item in nodes:
-        airing_at = item.get("airingAt")
 
-        if airing_at and airing_at <= now:
-            aired.append(item)
+def get_aired_today(planning, now):
+    """
+    Find every Planning episode that actually aired today.
+    """
 
-    if not aired:
-        return None
+    tz = get_timezone()
 
-    latest = max(
-        aired,
-        key=lambda item: item["airingAt"]
+    aired_today = []
+
+    for media in planning:
+        schedule = media.get("airingSchedule")
+
+        if not schedule:
+            continue
+
+        nodes = schedule.get("nodes") or []
+
+        for episode in nodes:
+            airing_at = episode.get("airingAt")
+            episode_number = episode.get("episode")
+
+            if not airing_at or not episode_number:
+                continue
+
+            # Must have already aired.
+            if airing_at > now:
+                continue
+
+            # Must have aired today.
+            if not is_today(airing_at, tz):
+                continue
+
+            aired_today.append(
+                {
+                    "media": media,
+                    "episode": episode_number,
+                    "airing_at": airing_at,
+                }
+            )
+
+    # Newest aired episode first.
+    aired_today.sort(
+        key=lambda item: item["airing_at"],
+        reverse=True,
     )
 
-    return {
-        "episode": latest["episode"],
-        "airing_at": latest["airingAt"],
-    }
+    return aired_today
 
 
-def build_embed(current, planning):
-    now = int(time.time())
+def get_upcoming(planning, now):
+    """
+    Find the next upcoming episode for every Planning anime.
+    """
 
-    current_upcoming = []
-    planning_upcoming = []
-    planning_aired = []
+    upcoming = []
 
-    # =========================================================
-    # CURRENTLY WATCHING
-    # =========================================================
-
-    for media in current:
+    for media in planning:
         next_episode = media.get("nextAiringEpisode")
 
         if not next_episode:
             continue
 
-        airing_at = next_episode["airingAt"]
-        episode = next_episode["episode"]
+        airing_at = next_episode.get("airingAt")
+        episode_number = next_episode.get("episode")
 
-        if airing_at > now:
-            current_upcoming.append(
-                {
-                    "media": media,
-                    "episode": episode,
-                    "airing_at": airing_at,
-                }
-            )
+        if not airing_at or not episode_number:
+            continue
 
-    # =========================================================
-    # PLANNING
-    # =========================================================
+        if airing_at <= now:
+            continue
 
-    for media in planning:
-
-        # -----------------------------------------------------
-        # UPCOMING
-        # -----------------------------------------------------
-
-        next_episode = media.get("nextAiringEpisode")
-
-        if next_episode:
-            airing_at = next_episode["airingAt"]
-            episode = next_episode["episode"]
-
-            if airing_at > now:
-                planning_upcoming.append(
-                    {
-                        "media": media,
-                        "episode": episode,
-                        "airing_at": airing_at,
-                    }
-                )
-
-        # -----------------------------------------------------
-        # ACTUAL LATEST AIRED EPISODE
-        # -----------------------------------------------------
-
-        latest_aired = get_latest_aired_episode(
-            media,
-            now
+        upcoming.append(
+            {
+                "media": media,
+                "episode": episode_number,
+                "airing_at": airing_at,
+            }
         )
 
-        if latest_aired:
-            planning_aired.append(
-                {
-                    "media": media,
-                    "episode": latest_aired["episode"],
-                    "airing_at": latest_aired["airing_at"],
-                }
-            )
-
-    # =========================================================
-    # SORT
-    # =========================================================
-
-    # Currently Watching:
-    # Soonest upcoming first.
-    current_upcoming.sort(
-        key=lambda x: x["airing_at"]
+    # Soonest episode first.
+    upcoming.sort(
+        key=lambda item: item["airing_at"]
     )
 
-    # Planning Upcoming:
-    # Soonest upcoming first.
-    planning_upcoming.sort(
-        key=lambda x: x["airing_at"]
+    return upcoming
+
+
+def build_embed(planning):
+    now = int(time.time())
+
+    aired_today = get_aired_today(
+        planning,
+        now
     )
 
-    # Planning Aired:
-    # Most recently aired first.
-    planning_aired.sort(
-        key=lambda x: x["airing_at"],
-        reverse=True
+    upcoming = get_upcoming(
+        planning,
+        now
     )
 
     fields = []
 
     # =========================================================
-    # PLANNING — AIRED
+    # AIRED TODAY
     # =========================================================
 
-    if planning_aired:
+    if aired_today:
         text = []
 
-        for item in planning_aired[:MAX_PLANNING_AIRED]:
+        for item in aired_today[:MAX_AIRED]:
             media = item["media"]
             title = format_title(media)
 
             text.append(
                 f"**{title}**\n"
                 f"Episode **{item['episode']}** · "
-                f"Aired {discord_time(item['airing_at'])}"
+                f"{discord_relative_time(item['airing_at'])}"
             )
 
         fields.append(
             {
-                "name": "🔴 Planning — Aired",
+                "name": "🔴 Aired",
                 "value": "\n\n".join(text)[:1024],
                 "inline": False,
             }
         )
 
     # =========================================================
-    # CURRENTLY WATCHING — UPCOMING
+    # UPCOMING
     # =========================================================
 
-    if current_upcoming:
+    if upcoming:
         text = []
 
-        for item in current_upcoming[:MAX_UPCOMING]:
+        for item in upcoming[:MAX_UPCOMING]:
             media = item["media"]
             title = format_title(media)
 
             text.append(
                 f"**{title}**\n"
                 f"Episode **{item['episode']}** · "
-                f"{discord_time(item['airing_at'])}"
+                f"{discord_relative_time(item['airing_at'])}"
             )
 
         fields.append(
             {
-                "name": "🟢 Currently Watching",
-                "value": "\n\n".join(text)[:1024],
-                "inline": False,
-            }
-        )
-
-    # =========================================================
-    # PLANNING — UPCOMING
-    # =========================================================
-
-    if planning_upcoming:
-        text = []
-
-        for item in planning_upcoming[:MAX_PLANNING_UPCOMING]:
-            media = item["media"]
-            title = format_title(media)
-
-            text.append(
-                f"**{title}**\n"
-                f"Episode **{item['episode']}** · "
-                f"{discord_time(item['airing_at'])}"
-            )
-
-        fields.append(
-            {
-                "name": "📋 Planning — Upcoming",
+                "name": "🟢 Upcoming",
                 "value": "\n\n".join(text)[:1024],
                 "inline": False,
             }
@@ -349,7 +345,10 @@ def build_embed(current, planning):
         fields.append(
             {
                 "name": "📺 Schedule",
-                "value": "No aired or upcoming episodes found.",
+                "value": (
+                    "Nothing aired today and "
+                    "no upcoming episodes found."
+                ),
                 "inline": False,
             }
         )
@@ -360,17 +359,22 @@ def build_embed(current, planning):
 
     embed = {
         "title": "📅 Release Schedule",
-        "description": "AniList → Currently Watching + Planning",
+        "description": "AniList → Planning",
         "fields": fields,
         "footer": {
             "text": "Automatically updated • AniList"
         },
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(
+            timezone.utc
+        ).isoformat(),
     }
 
-    # Thumbnail
-    for media in current + planning:
-        image = media.get("coverImage", {}).get("medium")
+    # Use the first available anime cover as thumbnail.
+    for media in planning:
+        image = media.get(
+            "coverImage",
+            {}
+        ).get("medium")
 
         if image:
             embed["thumbnail"] = {
@@ -405,7 +409,8 @@ def send_webhook(payload):
     )
 
     print(
-        f"Discord response status: {response.status_code}"
+        f"Discord response status: "
+        f"{response.status_code}"
     )
 
     if response.status_code == 429:
@@ -415,7 +420,8 @@ def send_webhook(payload):
         )
 
         print(
-            f"Rate limited. Waiting {retry} seconds..."
+            f"Rate limited. Waiting "
+            f"{retry} seconds..."
         )
 
         time.sleep(float(retry))
@@ -429,10 +435,14 @@ def send_webhook(payload):
 
 def edit_webhook(message_id, payload):
     print(
-        f"Updating existing Discord message: {message_id}"
+        f"Updating existing Discord message: "
+        f"{message_id}"
     )
 
-    url = f"{WEBHOOK_URL}/messages/{message_id}"
+    url = (
+        f"{WEBHOOK_URL}"
+        f"/messages/{message_id}"
+    )
 
     response = requests.patch(
         url,
@@ -441,7 +451,8 @@ def edit_webhook(message_id, payload):
     )
 
     print(
-        f"Discord response status: {response.status_code}"
+        f"Discord response status: "
+        f"{response.status_code}"
     )
 
     if response.status_code == 429:
@@ -451,7 +462,8 @@ def edit_webhook(message_id, payload):
         )
 
         print(
-            f"Rate limited. Waiting {retry} seconds..."
+            f"Rate limited. Waiting "
+            f"{retry} seconds..."
         )
 
         time.sleep(float(retry))
@@ -463,7 +475,8 @@ def edit_webhook(message_id, payload):
 
     if response.status_code == 404:
         print(
-            "Existing Discord message was not found."
+            "Existing Discord message "
+            "was not found."
         )
 
         return False
@@ -475,23 +488,21 @@ def edit_webhook(message_id, payload):
 
 def main():
     print(
-        f"Getting AniList lists for: {USERNAME}"
+        f"Getting AniList Planning list "
+        f"for: {USERNAME}"
     )
-
-    current, planning = get_all_anime()
 
     print(
-        f"Found {len(current)} currently watching anime."
+        f"Using timezone: {DISPLAY_TIMEZONE}"
     )
+
+    planning = get_planning()
 
     print(
         f"Found {len(planning)} planning anime."
     )
 
-    embed = build_embed(
-        current,
-        planning
-    )
+    embed = build_embed(planning)
 
     payload = {
         "username": "AniList Schedule",
@@ -515,17 +526,20 @@ def main():
 
         if success:
             print(
-                f"Updated Discord message: {message_id}"
+                f"Updated Discord message: "
+                f"{message_id}"
             )
 
             print(
-                f"DISCORD_MESSAGE_ID={message_id}"
+                f"DISCORD_MESSAGE_ID="
+                f"{message_id}"
             )
 
             return
 
         print(
-            "Existing message could not be updated."
+            "Existing message could not "
+            "be updated."
         )
 
         print(
