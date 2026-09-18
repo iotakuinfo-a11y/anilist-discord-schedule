@@ -46,11 +46,7 @@ query ($userName: String, $status: MediaListStatus) {
             timeUntilAiring
           }
 
-          airingSchedule(
-            notYetAired: false
-            sort: TIME_DESC
-            perPage: 1
-          ) {
+          airingSchedule {
             nodes {
               airingAt
               episode
@@ -65,6 +61,8 @@ query ($userName: String, $status: MediaListStatus) {
 
 
 def get_anime(status):
+    print(f"Fetching AniList {status} list...")
+
     response = requests.post(
         ANILIST_API,
         json={
@@ -77,11 +75,17 @@ def get_anime(status):
         timeout=30,
     )
 
+    if response.status_code != 200:
+        print("AniList returned an error:")
+        print(response.text)
+
     response.raise_for_status()
 
     data = response.json()
 
     if "errors" in data:
+        print("AniList GraphQL errors:")
+        print(data["errors"])
         raise RuntimeError(str(data["errors"]))
 
     lists = data["data"]["MediaListCollection"]["lists"]
@@ -136,19 +140,6 @@ def discord_time(timestamp):
 
 
 def get_latest_aired_episode(media, now):
-    """
-    Get the most recently aired episode from AniList's
-    airing schedule.
-
-    Returns:
-        {
-            "episode": episode_number,
-            "airing_at": unix_timestamp
-        }
-
-    or None if no aired episode is available.
-    """
-
     schedule = media.get("airingSchedule")
 
     if not schedule:
@@ -156,11 +147,13 @@ def get_latest_aired_episode(media, now):
 
     nodes = schedule.get("nodes") or []
 
-    aired = [
-        item
-        for item in nodes
-        if item.get("airingAt", 0) <= now
-    ]
+    aired = []
+
+    for item in nodes:
+        airing_at = item.get("airingAt")
+
+        if airing_at and airing_at <= now:
+            aired.append(item)
 
     if not aired:
         return None
@@ -185,9 +178,6 @@ def build_embed(current, planning):
 
     # =========================================================
     # CURRENTLY WATCHING
-    #
-    # Only show future episodes.
-    # Soonest episode first.
     # =========================================================
 
     for media in current:
@@ -215,7 +205,7 @@ def build_embed(current, planning):
     for media in planning:
 
         # -----------------------------------------------------
-        # NEXT UPCOMING EPISODE
+        # UPCOMING
         # -----------------------------------------------------
 
         next_episode = media.get("nextAiringEpisode")
@@ -234,9 +224,7 @@ def build_embed(current, planning):
                 )
 
         # -----------------------------------------------------
-        # LATEST AIRED EPISODE
-        #
-        # Uses the actual AniList airingSchedule timestamp.
+        # ACTUAL LATEST AIRED EPISODE
         # -----------------------------------------------------
 
         latest_aired = get_latest_aired_episode(
@@ -254,23 +242,23 @@ def build_embed(current, planning):
             )
 
     # =========================================================
-    # SORTING
+    # SORT
     # =========================================================
 
     # Currently Watching:
-    # Soonest upcoming episode first.
+    # Soonest upcoming first.
     current_upcoming.sort(
         key=lambda x: x["airing_at"]
     )
 
     # Planning Upcoming:
-    # Soonest upcoming episode first.
+    # Soonest upcoming first.
     planning_upcoming.sort(
         key=lambda x: x["airing_at"]
     )
 
     # Planning Aired:
-    # Most recently aired episode first.
+    # Most recently aired first.
     planning_aired.sort(
         key=lambda x: x["airing_at"],
         reverse=True
