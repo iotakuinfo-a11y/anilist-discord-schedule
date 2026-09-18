@@ -1,3 +1,4 @@
+
 import os
 import time
 from datetime import datetime, timezone
@@ -12,6 +13,7 @@ WEBHOOK_URL = os.environ["DISCORD_WEBHOOK_URL"]
 
 MAX_AIRED = 15
 MAX_UPCOMING = 15
+MAX_PLANNING = 15
 
 
 QUERY = """
@@ -49,14 +51,14 @@ query ($userName: String, $status: MediaListStatus) {
 """
 
 
-def get_anime():
+def get_anime(status):
     response = requests.post(
         ANILIST_API,
         json={
             "query": QUERY,
             "variables": {
                 "userName": USERNAME,
-                "status": "CURRENT",
+                "status": status,
             },
         },
         timeout=30,
@@ -82,10 +84,18 @@ def get_anime():
 
     # Remove duplicates
     unique = {}
+
     for media in anime:
         unique[media["id"]] = media
 
     return list(unique.values())
+
+
+def get_all_anime():
+    current = get_anime("CURRENT")
+    planning = get_anime("PLANNING")
+
+    return current, planning
 
 
 def anime_title(media):
@@ -103,13 +113,13 @@ def discord_time(timestamp):
     return f"<t:{timestamp}:R>"
 
 
-def build_embed(anime):
+def build_embed(current, planning):
     now = int(time.time())
 
     upcoming = []
     aired = []
 
-    for media in anime:
+    for media in current:
         next_episode = media.get("nextAiringEpisode")
 
         if not next_episode:
@@ -146,6 +156,9 @@ def build_embed(anime):
         key=lambda x: x["episode"],
         reverse=True,
     )
+
+    # Sort planning alphabetically
+    planning.sort(key=lambda media: anime_title(media).lower())
 
     fields = []
 
@@ -197,18 +210,47 @@ def build_embed(anime):
             }
         )
 
+    # -------------------------
+    # PLANNING
+    # -------------------------
+
+    if planning:
+        text = []
+
+        for media in planning[:MAX_PLANNING]:
+            title = anime_title(media)
+
+            if media.get("siteUrl"):
+                text.append(
+                    f"**[{title}]({media['siteUrl']})**"
+                )
+            else:
+                text.append(f"**{title}**")
+
+        fields.append(
+            {
+                "name": "📋 Planning",
+                "value": "\n".join(text)[:1024],
+                "inline": False,
+            }
+        )
+
+    # -------------------------
+    # EMPTY STATE
+    # -------------------------
+
     if not fields:
         fields.append(
             {
                 "name": "📺 Schedule",
-                "value": "No upcoming episodes found.",
+                "value": "No upcoming episodes or planning anime found.",
                 "inline": False,
             }
         )
 
     embed = {
         "title": f"📺 {USERNAME}'s Anime Schedule",
-        "description": "AniList → Currently Watching",
+        "description": "AniList → Currently Watching + Planning",
         "fields": fields,
         "footer": {
             "text": "Automatically updated • AniList"
@@ -217,7 +259,7 @@ def build_embed(anime):
     }
 
     # Use first available cover as thumbnail
-    for media in anime:
+    for media in current + planning:
         image = media.get("coverImage", {}).get("medium")
 
         if image:
@@ -231,7 +273,7 @@ def build_embed(anime):
 
 def get_existing_message():
     """
-    Get the message ID stored in GitHub Actions variables.
+    Get the Discord message ID from the environment.
     """
     return os.environ.get("DISCORD_MESSAGE_ID", "").strip()
 
@@ -285,13 +327,14 @@ def edit_webhook(message_id, payload):
 
 
 def main():
-    print(f"Getting AniList list for: {USERNAME}")
+    print(f"Getting AniList lists for: {USERNAME}")
 
-    anime = get_anime()
+    current, planning = get_all_anime()
 
-    print(f"Found {len(anime)} anime.")
+    print(f"Found {len(current)} currently watching anime.")
+    print(f"Found {len(planning)} planning anime.")
 
-    embed = build_embed(anime)
+    embed = build_embed(current, planning)
 
     payload = {
         "username": "AniList Schedule",
@@ -326,3 +369,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
