@@ -5,16 +5,14 @@ from datetime import datetime, timezone
 
 import requests
 
-
 ANILIST_API = "https://graphql.anilist.co"
 
 USERNAME = os.environ["ANILIST_USERNAME"]
 WEBHOOK_URL = os.environ["DISCORD_WEBHOOK_URL"]
 
-MAX_AIRED = 15
 MAX_UPCOMING = 15
-MAX_PLANNING = 15
-
+MAX_PLANNING_Aired = 15
+MAX_PLANNING_UPCOMING = 15
 
 QUERY = """
 query ($userName: String, $status: MediaListStatus) {
@@ -113,17 +111,26 @@ def discord_time(timestamp):
     return f"<t:{timestamp}:R>"
 
 
+def format_title(media):
+    title = anime_title(media)
+
+    if media.get("siteUrl"):
+        return f"[{title}]({media['siteUrl']})"
+
+    return title
+
+
 def build_embed(current, planning):
     now = int(time.time())
 
-    upcoming = []
+    current_upcoming = []
     planning_upcoming = []
     planning_aired = []
 
-    # =========================================================
+    # ---------------------------------------------------------
     # CURRENTLY WATCHING
-    # Only show upcoming episodes.
-    # =========================================================
+    # Only show future episodes.
+    # ---------------------------------------------------------
 
     for media in current:
         next_episode = media.get("nextAiringEpisode")
@@ -135,7 +142,7 @@ def build_embed(current, planning):
         episode = next_episode["episode"]
 
         if airing_at > now:
-            upcoming.append(
+            current_upcoming.append(
                 {
                     "media": media,
                     "episode": episode,
@@ -143,10 +150,15 @@ def build_embed(current, planning):
                 }
             )
 
-    # =========================================================
+    # ---------------------------------------------------------
     # PLANNING
-    # Show future episodes and the previous aired episode.
-    # =========================================================
+    #
+    # Upcoming:
+    # Show the next future episode.
+    #
+    # Aired:
+    # Show the episode immediately before the next airing episode.
+    # ---------------------------------------------------------
 
     for media in planning:
         next_episode = media.get("nextAiringEpisode")
@@ -157,7 +169,6 @@ def build_embed(current, planning):
         airing_at = next_episode["airingAt"]
         episode = next_episode["episode"]
 
-        # Future episode
         if airing_at > now:
             planning_upcoming.append(
                 {
@@ -167,57 +178,50 @@ def build_embed(current, planning):
                 }
             )
 
-            # Previous episode has aired
+            # If the next episode is episode 2 or later,
+            # the previous episode has already aired.
             if episode > 1:
                 planning_aired.append(
                     {
                         "media": media,
                         "episode": episode - 1,
-                        "airing_at": airing_at,
+                        "next_airing_at": airing_at,
                     }
                 )
 
-    # =========================================================
-    # SORTING
-    # =========================================================
-
-    # Soonest Currently Watching episode first
-    upcoming.sort(
+    # Sort current watching by next airing time
+    current_upcoming.sort(
         key=lambda x: x["airing_at"]
     )
 
-    # Most recently scheduled Planning episode first
+    # Most recently aired planning episodes first
     planning_aired.sort(
-        key=lambda x: x["airing_at"],
+        key=lambda x: x["next_airing_at"],
         reverse=True,
     )
 
-    # Soonest Planning episode first
+    # Soonest planning episodes first
     planning_upcoming.sort(
         key=lambda x: x["airing_at"]
     )
 
     fields = []
 
-    # =========================================================
+    # ---------------------------------------------------------
     # PLANNING — AIRED
-    # =========================================================
+    # ---------------------------------------------------------
 
     if planning_aired:
         text = []
 
-        for item in planning_aired[:MAX_AIRED]:
+        for item in planning_aired[:MAX_PLANNING_Aired]:
             media = item["media"]
-
-            title = anime_title(media)
-
-            if media.get("siteUrl"):
-                title = f"[{title}]({media['siteUrl']})"
+            title = format_title(media)
 
             text.append(
                 f"**{title}**\n"
                 f"Episode **{item['episode']}** · "
-                f"Next {discord_time(item['airing_at'])}"
+                f"Next episode {discord_time(item['next_airing_at'])}"
             )
 
         fields.append(
@@ -228,20 +232,16 @@ def build_embed(current, planning):
             }
         )
 
-    # =========================================================
+    # ---------------------------------------------------------
     # CURRENTLY WATCHING — UPCOMING
-    # =========================================================
+    # ---------------------------------------------------------
 
-    if upcoming:
+    if current_upcoming:
         text = []
 
-        for item in upcoming[:MAX_UPCOMING]:
+        for item in current_upcoming[:MAX_UPCOMING]:
             media = item["media"]
-
-            title = anime_title(media)
-
-            if media.get("siteUrl"):
-                title = f"[{title}]({media['siteUrl']})"
+            title = format_title(media)
 
             text.append(
                 f"**{title}**\n"
@@ -257,20 +257,16 @@ def build_embed(current, planning):
             }
         )
 
-    # =========================================================
+    # ---------------------------------------------------------
     # PLANNING — UPCOMING
-    # =========================================================
+    # ---------------------------------------------------------
 
     if planning_upcoming:
         text = []
 
-        for item in planning_upcoming[:MAX_PLANNING]:
+        for item in planning_upcoming[:MAX_PLANNING_UPCOMING]:
             media = item["media"]
-
-            title = anime_title(media)
-
-            if media.get("siteUrl"):
-                title = f"[{title}]({media['siteUrl']})"
+            title = format_title(media)
 
             text.append(
                 f"**{title}**\n"
@@ -286,9 +282,9 @@ def build_embed(current, planning):
             }
         )
 
-    # =========================================================
+    # ---------------------------------------------------------
     # NOTHING FOUND
-    # =========================================================
+    # ---------------------------------------------------------
 
     if not fields:
         fields.append(
@@ -299,9 +295,9 @@ def build_embed(current, planning):
             }
         )
 
-    # =========================================================
-    # DISCORD EMBED
-    # =========================================================
+    # ---------------------------------------------------------
+    # EMBED
+    # ---------------------------------------------------------
 
     embed = {
         "title": f"📺 {USERNAME}'s Anime Schedule",
@@ -313,7 +309,7 @@ def build_embed(current, planning):
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
-    # Use first available cover as thumbnail
+    # Add a thumbnail from the first available anime
     for media in current + planning:
         image = media.get("coverImage", {}).get("medium")
 
@@ -327,9 +323,6 @@ def build_embed(current, planning):
 
 
 def get_existing_message():
-    """
-    Get the Discord message ID from GitHub Actions variables.
-    """
     return os.environ.get(
         "DISCORD_MESSAGE_ID",
         ""
@@ -337,13 +330,10 @@ def get_existing_message():
 
 
 def send_webhook(payload):
-    """
-    Create a new Discord message.
-    """
+    print("Sending new message to Discord...")
 
     url = WEBHOOK_URL
 
-    # ?wait=true makes Discord return the created message.
     if "?" in url:
         url += "&wait=true"
     else:
@@ -354,6 +344,8 @@ def send_webhook(payload):
         json=payload,
         timeout=30,
     )
+
+    print(f"Discord response status: {response.status_code}")
 
     if response.status_code == 429:
         retry = response.json().get(
@@ -375,12 +367,9 @@ def send_webhook(payload):
 
 
 def edit_webhook(message_id, payload):
-    """
-    Edit an existing Discord webhook message.
-
-    Returns True if successful.
-    Returns False if the message cannot be found.
-    """
+    print(
+        f"Updating existing Discord message: {message_id}"
+    )
 
     url = f"{WEBHOOK_URL}/messages/{message_id}"
 
@@ -388,6 +377,10 @@ def edit_webhook(message_id, payload):
         url,
         json=payload,
         timeout=30,
+    )
+
+    print(
+        f"Discord response status: {response.status_code}"
     )
 
     if response.status_code == 429:
@@ -407,8 +400,6 @@ def edit_webhook(message_id, payload):
             payload
         )
 
-    # The saved message ID does not belong
-    # to this webhook or no longer exists.
     if response.status_code == 404:
         print(
             "Existing Discord message was not found."
@@ -451,16 +442,11 @@ def main():
 
     message_id = get_existing_message()
 
-    # =========================================================
+    # ---------------------------------------------------------
     # UPDATE EXISTING MESSAGE
-    # =========================================================
+    # ---------------------------------------------------------
 
     if message_id:
-        print(
-            f"Updating existing Discord message: "
-            f"{message_id}"
-        )
-
         success = edit_webhook(
             message_id,
             payload
@@ -468,13 +454,43 @@ def main():
 
         if success:
             print(
+                f"Updated Discord message: {message_id}"
+            )
+
+            print(
                 f"DISCORD_MESSAGE_ID={message_id}"
             )
+
             return
+
+        print(
+            "Existing message could not be updated."
+        )
 
         print(
             "Creating a new Discord message..."
         )
 
-    # ===================================
+    # ---------------------------------------------------------
+    # CREATE NEW MESSAGE
+    # ---------------------------------------------------------
+
+    message = send_webhook(payload)
+
+    message_id = message["id"]
+
+    print(
+        f"Created message: {message_id}"
+    )
+
+    print(
+        f"DISCORD_MESSAGE_ID={message_id}"
+    )
+
+
+# IMPORTANT:
+# This starts the script when GitHub Actions runs:
+# python update.py
+if __name__ == "__main__":
+    main()
 
