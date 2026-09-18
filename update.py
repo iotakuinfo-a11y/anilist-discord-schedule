@@ -11,20 +11,18 @@ ANILIST_API = "https://graphql.anilist.co"
 USERNAME = os.environ["ANILIST_USERNAME"]
 WEBHOOK_URL = os.environ["DISCORD_WEBHOOK_URL"]
 
-# Change this if you want "today" based on a different timezone.
-# Examples:
-#   Pacific/Honolulu
-#   America/Los_Angeles
-#   America/New_York
-#   Europe/London
-#   Asia/Tokyo
+# Timezone used to determine what counts as "today".
 DISPLAY_TIMEZONE = os.environ.get(
     "DISPLAY_TIMEZONE",
     "Pacific/Honolulu",
 )
 
-MAX_AIRED = 15
-MAX_UPCOMING = 15
+# Discord allows up to 1024 characters per embed field.
+# We stay safely below that limit.
+MAX_FIELD_LENGTH = 1000
+
+MAX_AIRED = 50
+MAX_UPCOMING = 50
 
 QUERY = """
 query ($userName: String, $status: MediaListStatus) {
@@ -124,7 +122,7 @@ def get_anime(status):
             if media:
                 anime.append(media)
 
-    # Remove duplicates
+    # Remove duplicates.
     unique = {}
 
     for media in anime:
@@ -159,25 +157,24 @@ def format_title(media):
 
 def discord_relative_time(timestamp):
     """
-    Discord automatically displays this as:
+    Discord automatically displays:
       2 hours ago
       5 minutes ago
       in 3 hours
-      tomorrow
-      etc.
+      in 2 days
     """
     return f"<t:{timestamp}:R>"
 
 
 def is_today(timestamp, tz):
     """
-    Check whether an airing timestamp happened today
-    in the configured display timezone.
+    Check whether an episode aired today
+    in the configured timezone.
     """
 
     airing_date = datetime.fromtimestamp(
         timestamp,
-        tz
+        tz,
     ).date()
 
     today = datetime.now(tz).date()
@@ -187,7 +184,7 @@ def is_today(timestamp, tz):
 
 def get_aired_today(planning, now):
     """
-    Find every Planning episode that actually aired today.
+    Find Planning episodes that actually aired today.
     """
 
     tz = get_timezone()
@@ -209,11 +206,11 @@ def get_aired_today(planning, now):
             if not airing_at or not episode_number:
                 continue
 
-            # Must have already aired.
+            # Episode must already have aired.
             if airing_at > now:
                 continue
 
-            # Must have aired today.
+            # Episode must have aired today.
             if not is_today(airing_at, tz):
                 continue
 
@@ -225,7 +222,7 @@ def get_aired_today(planning, now):
                 }
             )
 
-    # Newest aired episode first.
+    # Most recently aired first.
     aired_today.sort(
         key=lambda item: item["airing_at"],
         reverse=True,
@@ -236,7 +233,7 @@ def get_aired_today(planning, now):
 
 def get_upcoming(planning, now):
     """
-    Find the next upcoming episode for every Planning anime.
+    Find the next upcoming episode for each Planning anime.
     """
 
     upcoming = []
@@ -253,6 +250,7 @@ def get_upcoming(planning, now):
         if not airing_at or not episode_number:
             continue
 
+        # Must be in the future.
         if airing_at <= now:
             continue
 
@@ -264,7 +262,7 @@ def get_upcoming(planning, now):
             }
         )
 
-    # Soonest episode first.
+    # Soonest first.
     upcoming.sort(
         key=lambda item: item["airing_at"]
     )
@@ -272,17 +270,77 @@ def get_upcoming(planning, now):
     return upcoming
 
 
+def split_into_fields(entries, field_name):
+    """
+    Split a list of formatted anime entries into multiple
+    Discord embed fields so nothing gets cut off.
+
+    Each field stays below Discord's 1024-character limit.
+    """
+
+    fields = []
+
+    current_entries = []
+    current_length = 0
+
+    for entry in entries:
+        entry_length = len(entry)
+
+        # Account for the \n\n separator.
+        separator_length = 2 if current_entries else 0
+
+        # If adding this entry would exceed our limit,
+        # start a new field.
+        if (
+            current_entries
+            and current_length
+            + separator_length
+            + entry_length
+            > MAX_FIELD_LENGTH
+        ):
+            fields.append(
+                {
+                    "name": field_name,
+                    "value": "\n\n".join(current_entries),
+                    "inline": False,
+                }
+            )
+
+            current_entries = []
+            current_length = 0
+            separator_length = 0
+
+        current_entries.append(entry)
+
+        current_length += (
+            separator_length
+            + entry_length
+        )
+
+    # Add the final field.
+    if current_entries:
+        fields.append(
+            {
+                "name": field_name,
+                "value": "\n\n".join(current_entries),
+                "inline": False,
+            }
+        )
+
+    return fields
+
+
 def build_embed(planning):
     now = int(time.time())
 
     aired_today = get_aired_today(
         planning,
-        now
+        now,
     )
 
     upcoming = get_upcoming(
         planning,
-        now
+        now,
     )
 
     fields = []
@@ -292,24 +350,23 @@ def build_embed(planning):
     # =========================================================
 
     if aired_today:
-        text = []
+        aired_entries = []
 
         for item in aired_today[:MAX_AIRED]:
             media = item["media"]
             title = format_title(media)
 
-            text.append(
+            aired_entries.append(
                 f"**{title}**\n"
                 f"Episode **{item['episode']}** · "
                 f"{discord_relative_time(item['airing_at'])}"
             )
 
-        fields.append(
-            {
-                "name": "🔴 Aired",
-                "value": "\n\n".join(text)[:1024],
-                "inline": False,
-            }
+        fields.extend(
+            split_into_fields(
+                aired_entries,
+                "🔴 Aired",
+            )
         )
 
     # =========================================================
@@ -317,24 +374,23 @@ def build_embed(planning):
     # =========================================================
 
     if upcoming:
-        text = []
+        upcoming_entries = []
 
         for item in upcoming[:MAX_UPCOMING]:
             media = item["media"]
             title = format_title(media)
 
-            text.append(
+            upcoming_entries.append(
                 f"**{title}**\n"
                 f"Episode **{item['episode']}** · "
                 f"{discord_relative_time(item['airing_at'])}"
             )
 
-        fields.append(
-            {
-                "name": "🟢 Upcoming",
-                "value": "\n\n".join(text)[:1024],
-                "inline": False,
-            }
+        fields.extend(
+            split_into_fields(
+                upcoming_entries,
+                "🟢 Upcoming",
+            )
         )
 
     # =========================================================
@@ -362,23 +418,23 @@ def build_embed(planning):
         "description": "AniList → Planning",
         "fields": fields,
         "footer": {
-            "text": "Automatically updated • AniList"
+            "text": "Automatically updated • AniList",
         },
         "timestamp": datetime.now(
             timezone.utc
         ).isoformat(),
     }
 
-    # Use the first available anime cover as thumbnail.
+    # Use an AniList cover as the thumbnail.
     for media in planning:
-        image = media.get(
-            "coverImage",
-            {}
-        ).get("medium")
+        image = (
+            media.get("coverImage", {})
+            .get("medium")
+        )
 
         if image:
             embed["thumbnail"] = {
-                "url": image
+                "url": image,
             }
             break
 
@@ -388,7 +444,7 @@ def build_embed(planning):
 def get_existing_message():
     return os.environ.get(
         "DISCORD_MESSAGE_ID",
-        ""
+        "",
     ).strip()
 
 
@@ -416,7 +472,7 @@ def send_webhook(payload):
     if response.status_code == 429:
         retry = response.json().get(
             "retry_after",
-            2
+            2,
         )
 
         print(
@@ -458,7 +514,7 @@ def edit_webhook(message_id, payload):
     if response.status_code == 429:
         retry = response.json().get(
             "retry_after",
-            2
+            2,
         )
 
         print(
@@ -470,7 +526,7 @@ def edit_webhook(message_id, payload):
 
         return edit_webhook(
             message_id,
-            payload
+            payload,
         )
 
     if response.status_code == 404:
@@ -493,7 +549,8 @@ def main():
     )
 
     print(
-        f"Using timezone: {DISPLAY_TIMEZONE}"
+        f"Using timezone: "
+        f"{DISPLAY_TIMEZONE}"
     )
 
     planning = get_planning()
@@ -508,7 +565,7 @@ def main():
         "username": "AniList Schedule",
         "embeds": [embed],
         "allowed_mentions": {
-            "parse": []
+            "parse": [],
         },
     }
 
@@ -521,7 +578,7 @@ def main():
     if message_id:
         success = edit_webhook(
             message_id,
-            payload
+            payload,
         )
 
         if success:
