@@ -300,7 +300,7 @@ def build_embed(current, planning):
     # ---------------------------------------------------------
 
     embed = {
-        "title": f"📺 {USERNAME}'s Anime Schedule",
+        "title": f"📅 Release Schedule",
         "description": "AniList → Currently Watching + Planning",
         "fields": fields,
         "footer": {
