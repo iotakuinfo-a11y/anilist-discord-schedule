@@ -344,7 +344,7 @@ def main():
         },
     }
 
-    message_id = ""
+    message_id = get_existing_message()
 
     if message_id:
         print(f"Updating existing Discord message: {message_id}")
