@@ -32,11 +32,27 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests
 
-      - name: Update Discord embed
+      - name: Check environment
         env:
           ANILIST_USERNAME: ${{ vars.ANILIST_USERNAME }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           DISCORD_MESSAGE_ID: ${{ vars.DISCORD_MESSAGE_ID }}
         run: |
-          python update.py | tee update.log
+          echo "Starting diagnostic..."
+          echo "Username: ${ANILIST_USERNAME}"
+          echo "Message ID is set: $([ -n "$DISCORD_MESSAGE_ID" ] && echo yes || echo no)"
+          echo "Webhook secret is set: $([ -n "$DISCORD_WEBHOOK_URL" ] && echo yes || echo no)"
+          echo "Python version:"
+          python --version
+          echo "update.py exists:"
+          ls -l update.py
 
+      - name: Run update.py
+        env:
+          ANILIST_USERNAME: ${{ vars.ANILIST_USERNAME }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          DISCORD_MESSAGE_ID: ${{ vars.DISCORD_MESSAGE_ID }}
+        run: |
+          echo "Launching update.py..."
+          python -u update.py
+          echo "update.py finished."
