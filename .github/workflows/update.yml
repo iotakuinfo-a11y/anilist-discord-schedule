@@ -60,11 +60,4 @@ jobs:
 
           echo "message_id=$ID" >> "$GITHUB_OUTPUT"
 
-      - name: Save Discord message ID
-        if: steps.message.outputs.id == ''
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh variable set DISCORD_MESSAGE_ID \
-            --repo "$GITHUB_REPOSITORY" \
-            --body "${{ steps.update.outputs.message_id }}"
+      
