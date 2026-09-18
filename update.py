@@ -17,10 +17,6 @@ DISPLAY_TIMEZONE = os.environ.get(
     "Pacific/Honolulu",
 )
 
-# Discord embed descriptions have a 4096-character limit.
-# Stay safely below it.
-MAX_DESCRIPTION_LENGTH = 3800
-
 
 QUERY = """
 query ($userName: String, $status: MediaListStatus) {
@@ -257,136 +253,82 @@ def get_upcoming(planning, now):
     return upcoming
 
 
-def make_entry(item):
-    media = item["media"]
-
-    return (
-        f"**{format_title(media)}**\n"
-        f"Episode **{item['episode']}** · "
-        f"{discord_relative_time(item['airing_at'])}"
-    )
-
-
-def split_entries(entries):
-    """
-    Split entries into groups that fit inside
-    Discord's embed description limit.
-    """
-
-    groups = []
-
-    current = []
-    current_length = 0
-
-    for entry in entries:
-        separator_length = 2 if current else 0
-
-        new_length = (
-            current_length
-            + separator_length
-            + len(entry)
-        )
-
-        if (
-            current
-            and new_length > MAX_DESCRIPTION_LENGTH
-        ):
-            groups.append(current)
-
-            current = []
-            current_length = 0
-
-            separator_length = 0
-
-        current.append(entry)
-
-        current_length += (
-            separator_length
-            + len(entry)
-        )
-
-    if current:
-        groups.append(current)
-
-    return groups
-
-
-def build_embeds(
-    title,
-    description,
-    items,
-    empty_description,
+def build_embed(
+    aired_today,
+    upcoming,
 ):
-    entries = [
-        make_entry(item)
-        for item in items
-    ]
+    lines = []
 
-    # --------------------------------------------------------
-    # No entries
-    # --------------------------------------------------------
+    # Aired today
+    if aired_today:
+        lines.append("🔴 **Aired Today**")
 
-    if not entries:
-        return [
-            {
-                "title": title,
-                "description": empty_description,
-                "footer": {
-                    "text": "Automatically updated • AniList"
-                },
-                "timestamp": datetime.now(
-                    timezone.utc
-                ).isoformat(),
-            }
-        ]
+        for item in aired_today:
+            media = item["media"]
 
-    # --------------------------------------------------------
-    # Split into multiple embeds if necessary
-    # --------------------------------------------------------
-
-    groups = split_entries(entries)
-
-    embeds = []
-
-    for index, group in enumerate(groups, start=1):
-        if len(groups) == 1:
-            embed_title = title
-        else:
-            embed_title = (
-                f"{title} — Part {index}"
+            lines.append(
+                f"**{format_title(media)}**\n"
+                f"Episode **{item['episode']}** · "
+                f"{discord_relative_time(item['airing_at'])}"
             )
 
-        embed = {
-            "title": embed_title,
-            "description": "\n\n".join(group),
-            "footer": {
-                "text": "Automatically updated • AniList"
-            },
-            "timestamp": datetime.now(
-                timezone.utc
-            ).isoformat(),
-        }
+    # Upcoming
+    if upcoming:
+        if lines:
+            lines.append("")
 
-        # Cover image for the first anime in
-        # this particular embed.
-        media = items[
-            sum(len(group) for group in groups[:index - 1])
-        ]["media"]
+        lines.append("🟢 **Upcoming**")
 
+        for item in upcoming:
+            media = item["media"]
+
+            lines.append(
+                f"**{format_title(media)}**\n"
+                f"Episode **{item['episode']}** · "
+                f"{discord_relative_time(item['airing_at'])}"
+            )
+
+    if not lines:
+        lines.append(
+            "No aired or upcoming episodes found."
+        )
+
+    embed = {
+        "title": "📺 AniList Schedule",
+        "description": "\n\n".join(lines),
+        "footer": {
+            "text": "Automatically updated • AniList"
+        },
+        "timestamp": datetime.now(
+            timezone.utc
+        ).isoformat(),
+    }
+
+    # Use the first upcoming anime's cover,
+    # or the most recently aired anime if there
+    # are no upcoming episodes.
+    image = None
+
+    if upcoming:
         image = (
-            media
+            upcoming[0]["media"]
             .get("coverImage", {})
             .get("medium")
         )
 
-        if image:
-            embed["thumbnail"] = {
-                "url": image
-            }
+    elif aired_today:
+        image = (
+            aired_today[0]["media"]
+            .get("coverImage", {})
+            .get("medium")
+        )
 
-        embeds.append(embed)
+    if image:
+        embed["thumbnail"] = {
+            "url": image
+        }
 
-    return embeds
+    return embed
 
 
 def get_existing_message():
@@ -436,7 +378,10 @@ def send_webhook(payload):
     return response.json()
 
 
-def edit_webhook(message_id, payload):
+def edit_webhook(
+    message_id,
+    payload,
+):
     print(
         "Updating existing Discord message: "
         f"{message_id}"
@@ -522,36 +467,18 @@ def main():
         f"Upcoming: {len(upcoming)}"
     )
 
-    aired_embeds = build_embeds(
-        "🔴 Aired",
-        "Episodes that aired today",
+    embed = build_embed(
         aired_today,
-        "No Planning anime aired today.",
-    )
-
-    upcoming_embeds = build_embeds(
-        "🟢 Upcoming",
-        "Next episodes from Planning",
         upcoming,
-        "No upcoming episodes found in Planning.",
-    )
-
-    embeds = (
-        aired_embeds
-        + upcoming_embeds
     )
 
     payload = {
         "username": "AniList Schedule",
-        "embeds": embeds,
+        "embeds": [embed],
         "allowed_mentions": {
             "parse": []
         },
     }
-
-    print(
-        f"Sending {len(embeds)} Discord embeds."
-    )
 
     message_id = get_existing_message()
 
@@ -566,6 +493,7 @@ def main():
                 "Successfully updated Discord "
                 f"message: {message_id}"
             )
+
             return
 
         print(
