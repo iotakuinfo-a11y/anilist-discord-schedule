@@ -1,9 +1,8 @@
-# AniList Discord updater
+
 name: Update AniList Discord Embed
 
 on:
   workflow_dispatch:
-
   schedule:
     - cron: "*/15 * * * *"
 
@@ -56,3 +55,4 @@ jobs:
           echo "Launching update.py..."
           python -u update.py
           echo "update.py finished."
+
