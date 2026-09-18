@@ -253,49 +253,26 @@ def get_upcoming(planning, now):
     return upcoming
 
 
-def build_embed(
-    aired_today,
-    upcoming,
-):
+def build_aired_embed(aired_today):
     lines = []
 
-    # Aired today
-    if aired_today:
-        lines.append("🔴 **Aired Today**")
+    for item in aired_today:
+        media = item["media"]
 
-        for item in aired_today:
-            media = item["media"]
-
-            lines.append(
-                f"**{format_title(media)}**\n"
-                f"Episode **{item['episode']}** · "
-                f"{discord_relative_time(item['airing_at'])}"
-            )
-
-    # Upcoming
-    if upcoming:
-        if lines:
-            lines.append("")
-
-        lines.append("🟢 **Upcoming**")
-
-        for item in upcoming:
-            media = item["media"]
-
-            lines.append(
-                f"**{format_title(media)}**\n"
-                f"Episode **{item['episode']}** · "
-                f"{discord_relative_time(item['airing_at'])}"
-            )
-
-    if not lines:
         lines.append(
-            "No aired or upcoming episodes found."
+            f"**{format_title(media)}**\n"
+            f"Episode **{item['episode']}** · "
+            f"{discord_relative_time(item['airing_at'])}"
         )
 
+    if not lines:
+        description = "No Planning anime aired today."
+    else:
+        description = "\n\n".join(lines)
+
     embed = {
-        "title": "📺 AniList Schedule",
-        "description": "\n\n".join(lines),
+        "title": "🔴 Aired",
+        "description": description,
         "footer": {
             "text": "Automatically updated • AniList"
         },
@@ -304,10 +281,50 @@ def build_embed(
         ).isoformat(),
     }
 
-    # Use the first upcoming anime's cover,
-    # or the most recently aired anime if there
-    # are no upcoming episodes.
-    image = None
+    if aired_today:
+        image = (
+            aired_today[0]["media"]
+            .get("coverImage", {})
+            .get("medium")
+        )
+
+        if image:
+            embed["thumbnail"] = {
+                "url": image
+            }
+
+    return embed
+
+
+def build_upcoming_embed(upcoming):
+    lines = []
+
+    for item in upcoming:
+        media = item["media"]
+
+        lines.append(
+            f"**{format_title(media)}**\n"
+            f"Episode **{item['episode']}** · "
+            f"{discord_relative_time(item['airing_at'])}"
+        )
+
+    if not lines:
+        description = (
+            "No upcoming episodes found in Planning."
+        )
+    else:
+        description = "\n\n".join(lines)
+
+    embed = {
+        "title": "🟢 Upcoming",
+        "description": description,
+        "footer": {
+            "text": "Automatically updated • AniList"
+        },
+        "timestamp": datetime.now(
+            timezone.utc
+        ).isoformat(),
+    }
 
     if upcoming:
         image = (
@@ -316,17 +333,10 @@ def build_embed(
             .get("medium")
         )
 
-    elif aired_today:
-        image = (
-            aired_today[0]["media"]
-            .get("coverImage", {})
-            .get("medium")
-        )
-
-    if image:
-        embed["thumbnail"] = {
-            "url": image
-        }
+        if image:
+            embed["thumbnail"] = {
+                "url": image
+            }
 
     return embed
 
@@ -378,10 +388,7 @@ def send_webhook(payload):
     return response.json()
 
 
-def edit_webhook(
-    message_id,
-    payload,
-):
+def edit_webhook(message_id, payload):
     print(
         "Updating existing Discord message: "
         f"{message_id}"
@@ -467,14 +474,22 @@ def main():
         f"Upcoming: {len(upcoming)}"
     )
 
-    embed = build_embed(
-        aired_today,
-        upcoming,
+    aired_embed = build_aired_embed(
+        aired_today
+    )
+
+    upcoming_embed = build_upcoming_embed(
+        upcoming
     )
 
     payload = {
         "username": "AniList Schedule",
-        "embeds": [embed],
+
+        "embeds": [
+            aired_embed,
+            upcoming_embed,
+        ],
+
         "allowed_mentions": {
             "parse": []
         },
