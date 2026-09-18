@@ -301,7 +301,7 @@ def build_embed(current, planning):
 
     embed = {
         "title": f"📅 Release Schedule",
-        "description": "AniList → Currently Watching + Planning",
+        "description": "AniList release schedule",
         "fields": fields,
         "footer": {
             "text": "Automatically updated • AniList"
