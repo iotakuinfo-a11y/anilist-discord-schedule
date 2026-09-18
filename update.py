@@ -11,7 +11,7 @@ USERNAME = os.environ["ANILIST_USERNAME"]
 WEBHOOK_URL = os.environ["DISCORD_WEBHOOK_URL"]
 
 MAX_UPCOMING = 15
-MAX_PLANNING_Aired = 15
+MAX_PLANNING_AIRED = 15
 MAX_PLANNING_UPCOMING = 15
 
 QUERY = """
@@ -26,20 +26,35 @@ query ($userName: String, $status: MediaListStatus) {
       entries {
         media {
           id
+
           title {
             userPreferred
             romaji
             english
           }
+
           episodes
           siteUrl
+
           coverImage {
             medium
           }
+
           nextAiringEpisode {
             airingAt
             episode
             timeUntilAiring
+          }
+
+          airingSchedule(
+            notYetAired: false
+            sort: TIME_DESC
+            perPage: 1
+          ) {
+            nodes {
+              airingAt
+              episode
+            }
           }
         }
       }
@@ -107,10 +122,6 @@ def anime_title(media):
     )
 
 
-def discord_time(timestamp):
-    return f"<t:{timestamp}:R>"
-
-
 def format_title(media):
     title = anime_title(media)
 
@@ -120,6 +131,51 @@ def format_title(media):
     return title
 
 
+def discord_time(timestamp):
+    return f"<t:{timestamp}:R>"
+
+
+def get_latest_aired_episode(media, now):
+    """
+    Get the most recently aired episode from AniList's
+    airing schedule.
+
+    Returns:
+        {
+            "episode": episode_number,
+            "airing_at": unix_timestamp
+        }
+
+    or None if no aired episode is available.
+    """
+
+    schedule = media.get("airingSchedule")
+
+    if not schedule:
+        return None
+
+    nodes = schedule.get("nodes") or []
+
+    aired = [
+        item
+        for item in nodes
+        if item.get("airingAt", 0) <= now
+    ]
+
+    if not aired:
+        return None
+
+    latest = max(
+        aired,
+        key=lambda item: item["airingAt"]
+    )
+
+    return {
+        "episode": latest["episode"],
+        "airing_at": latest["airingAt"],
+    }
+
+
 def build_embed(current, planning):
     now = int(time.time())
 
@@ -127,10 +183,12 @@ def build_embed(current, planning):
     planning_upcoming = []
     planning_aired = []
 
-    # ---------------------------------------------------------
+    # =========================================================
     # CURRENTLY WATCHING
+    #
     # Only show future episodes.
-    # ---------------------------------------------------------
+    # Soonest episode first.
+    # =========================================================
 
     for media in current:
         next_episode = media.get("nextAiringEpisode")
@@ -150,78 +208,91 @@ def build_embed(current, planning):
                 }
             )
 
-    # ---------------------------------------------------------
+    # =========================================================
     # PLANNING
-    #
-    # Upcoming:
-    # Show the next future episode.
-    #
-    # Aired:
-    # Show the episode immediately before the next airing episode.
-    # ---------------------------------------------------------
+    # =========================================================
 
     for media in planning:
+
+        # -----------------------------------------------------
+        # NEXT UPCOMING EPISODE
+        # -----------------------------------------------------
+
         next_episode = media.get("nextAiringEpisode")
 
-        if not next_episode:
-            continue
+        if next_episode:
+            airing_at = next_episode["airingAt"]
+            episode = next_episode["episode"]
 
-        airing_at = next_episode["airingAt"]
-        episode = next_episode["episode"]
-
-        if airing_at > now:
-            planning_upcoming.append(
-                {
-                    "media": media,
-                    "episode": episode,
-                    "airing_at": airing_at,
-                }
-            )
-
-            # If the next episode is episode 2 or later,
-            # the previous episode has already aired.
-            if episode > 1:
-                planning_aired.append(
+            if airing_at > now:
+                planning_upcoming.append(
                     {
                         "media": media,
-                        "episode": episode - 1,
-                        "next_airing_at": airing_at,
+                        "episode": episode,
+                        "airing_at": airing_at,
                     }
                 )
 
-    # Sort current watching by next airing time
+        # -----------------------------------------------------
+        # LATEST AIRED EPISODE
+        #
+        # Uses the actual AniList airingSchedule timestamp.
+        # -----------------------------------------------------
+
+        latest_aired = get_latest_aired_episode(
+            media,
+            now
+        )
+
+        if latest_aired:
+            planning_aired.append(
+                {
+                    "media": media,
+                    "episode": latest_aired["episode"],
+                    "airing_at": latest_aired["airing_at"],
+                }
+            )
+
+    # =========================================================
+    # SORTING
+    # =========================================================
+
+    # Currently Watching:
+    # Soonest upcoming episode first.
     current_upcoming.sort(
         key=lambda x: x["airing_at"]
     )
 
-    # Most recently aired planning episodes first
-    planning_aired.sort(
-        key=lambda x: x["next_airing_at"],
-        reverse=True,
-    )
-
-    # Soonest planning episodes first
+    # Planning Upcoming:
+    # Soonest upcoming episode first.
     planning_upcoming.sort(
         key=lambda x: x["airing_at"]
     )
 
+    # Planning Aired:
+    # Most recently aired episode first.
+    planning_aired.sort(
+        key=lambda x: x["airing_at"],
+        reverse=True
+    )
+
     fields = []
 
-    # ---------------------------------------------------------
+    # =========================================================
     # PLANNING — AIRED
-    # ---------------------------------------------------------
+    # =========================================================
 
     if planning_aired:
         text = []
 
-        for item in planning_aired[:MAX_PLANNING_Aired]:
+        for item in planning_aired[:MAX_PLANNING_AIRED]:
             media = item["media"]
             title = format_title(media)
 
             text.append(
                 f"**{title}**\n"
                 f"Episode **{item['episode']}** · "
-                f"Next episode {discord_time(item['next_airing_at'])}"
+                f"Aired {discord_time(item['airing_at'])}"
             )
 
         fields.append(
@@ -232,9 +303,9 @@ def build_embed(current, planning):
             }
         )
 
-    # ---------------------------------------------------------
+    # =========================================================
     # CURRENTLY WATCHING — UPCOMING
-    # ---------------------------------------------------------
+    # =========================================================
 
     if current_upcoming:
         text = []
@@ -251,15 +322,15 @@ def build_embed(current, planning):
 
         fields.append(
             {
-                "name": "🟢 Upcoming",
+                "name": "🟢 Currently Watching",
                 "value": "\n\n".join(text)[:1024],
                 "inline": False,
             }
         )
 
-    # ---------------------------------------------------------
+    # =========================================================
     # PLANNING — UPCOMING
-    # ---------------------------------------------------------
+    # =========================================================
 
     if planning_upcoming:
         text = []
@@ -282,9 +353,9 @@ def build_embed(current, planning):
             }
         )
 
-    # ---------------------------------------------------------
+    # =========================================================
     # NOTHING FOUND
-    # ---------------------------------------------------------
+    # =========================================================
 
     if not fields:
         fields.append(
@@ -295,13 +366,13 @@ def build_embed(current, planning):
             }
         )
 
-    # ---------------------------------------------------------
+    # =========================================================
     # EMBED
-    # ---------------------------------------------------------
+    # =========================================================
 
     embed = {
-        "title": f"📅 Release Schedule",
-        "description": "AniList release schedule",
+        "title": "📺 Eldriane's Anime Schedule",
+        "description": "AniList → Currently Watching + Planning",
         "fields": fields,
         "footer": {
             "text": "Automatically updated • AniList"
@@ -309,7 +380,7 @@ def build_embed(current, planning):
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
-    # Add a thumbnail from the first available anime
+    # Thumbnail
     for media in current + planning:
         image = media.get("coverImage", {}).get("medium")
 
@@ -345,7 +416,9 @@ def send_webhook(payload):
         timeout=30,
     )
 
-    print(f"Discord response status: {response.status_code}")
+    print(
+        f"Discord response status: {response.status_code}"
+    )
 
     if response.status_code == 429:
         retry = response.json().get(
@@ -442,9 +515,9 @@ def main():
 
     message_id = get_existing_message()
 
-    # ---------------------------------------------------------
+    # =========================================================
     # UPDATE EXISTING MESSAGE
-    # ---------------------------------------------------------
+    # =========================================================
 
     if message_id:
         success = edit_webhook(
@@ -471,9 +544,9 @@ def main():
             "Creating a new Discord message..."
         )
 
-    # ---------------------------------------------------------
+    # =========================================================
     # CREATE NEW MESSAGE
-    # ---------------------------------------------------------
+    # =========================================================
 
     message = send_webhook(payload)
 
@@ -488,9 +561,6 @@ def main():
     )
 
 
-# IMPORTANT:
-# This starts the script when GitHub Actions runs:
-# python update.py
 if __name__ == "__main__":
     main()
 
