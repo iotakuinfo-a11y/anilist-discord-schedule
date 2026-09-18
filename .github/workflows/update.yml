@@ -1,3 +1,4 @@
+
 name: Update AniList Discord Embed
 
 on:
@@ -8,7 +9,6 @@ on:
 
 permissions:
   contents: read
-  actions: write
 
 concurrency:
   group: anilist-discord-update
@@ -19,7 +19,6 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-
       - name: Checkout
         uses: actions/checkout@v5
 
@@ -33,31 +32,11 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests
 
-      - name: Get Discord message ID
-        id: message
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          ID="$(gh variable get DISCORD_MESSAGE_ID --repo "$GITHUB_REPOSITORY" 2>/dev/null || true)"
-
-          echo "id=$ID" >> "$GITHUB_OUTPUT"
-
       - name: Update Discord embed
-        id: update
         env:
           ANILIST_USERNAME: ${{ vars.ANILIST_USERNAME }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-          DISCORD_MESSAGE_ID: ${{ steps.message.outputs.id }}
+          DISCORD_MESSAGE_ID: ${{ vars.DISCORD_MESSAGE_ID }}
         run: |
           python update.py | tee update.log
 
-          ID="$(grep '^DISCORD_MESSAGE_ID=' update.log | tail -1 | cut -d= -f2)"
-
-          if [ -z "$ID" ]; then
-            echo "Could not determine Discord message ID."
-            exit 1
-          fi
-
-          echo "message_id=$ID" >> "$GITHUB_OUTPUT"
-
-      
