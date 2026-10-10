@@ -483,6 +483,10 @@ def edit_webhook(message_id, payload):
 
         return False
 
+    print(f"Discord response status: {response.status_code}")
+
+    if not response.ok:
+    print(f"Discord error response: {response.text}")
     response.raise_for_status()
 
     return True
