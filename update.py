@@ -153,6 +153,7 @@ def get_aired_today(planning, now):
 
 def get_upcoming(planning, now):
     results = []
+    next_24_hours = now + (24 * 60 * 60)
 
     for media in planning:
         episode = media.get("nextAiringEpisode")
@@ -162,7 +163,11 @@ def get_upcoming(planning, now):
         aired_at = episode.get("airingAt")
         number = episode.get("episode")
 
-        if aired_at and number and aired_at > now:
+        if (
+            aired_at
+            and number
+            and now < aired_at <= next_24_hours
+        ):
             results.append({
                 "media": media,
                 "episode": number,
@@ -170,7 +175,6 @@ def get_upcoming(planning, now):
             })
 
     return sorted(results, key=lambda item: item["airing_at"])
-
 
 def make_entry(item):
     return (
