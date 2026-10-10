@@ -1,4 +1,5 @@
 
+import json
 import os
 import time
 from datetime import datetime, timezone
@@ -6,21 +7,19 @@ from zoneinfo import ZoneInfo
 
 import requests
 
-
 ANILIST_API = "https://graphql.anilist.co"
-
 USERNAME = os.environ["ANILIST_USERNAME"]
-WEBHOOK_URL = os.environ["DISCORD_WEBHOOK_URL"]
-
+WEBHOOK_URL = os.environ["DISCORD_WEBHOOK_URL"].rstrip("/")
 DISPLAY_TIMEZONE = os.environ.get(
-    "DISPLAY_TIMEZONE",
-    "Pacific/Honolulu",
+    "DISPLAY_TIMEZONE", "Pacific/Honolulu"
 )
 
-# Discord embed descriptions have a 4096-character limit.
-# Stay safely below it.
-MAX_DESCRIPTION_LENGTH = 3800
-
+# Discord's combined embed-text limit is 6000 per message.
+# Use a lower limit to leave room for safety.
+MAX_MESSAGE_TEXT = 5400
+MAX_DESCRIPTION_LENGTH = 3000
+MAX_EMBEDS_PER_MESSAGE = 10
+MESSAGE_IDS_FILE = "discord_message_ids.json"
 
 QUERY = """
 query ($userName: String, $status: MediaListStatus) {
@@ -34,29 +33,19 @@ query ($userName: String, $status: MediaListStatus) {
       entries {
         media {
           id
-
           title {
             userPreferred
             romaji
             english
           }
-
           siteUrl
-
-          coverImage {
-            medium
-          }
-
+          coverImage { medium }
           nextAiringEpisode {
             airingAt
             episode
             timeUntilAiring
           }
-
-          airingSchedule(
-            notYetAired: false
-            perPage: 25
-          ) {
+          airingSchedule(notYetAired: false, perPage: 25) {
             nodes {
               airingAt
               episode
@@ -74,16 +63,12 @@ def get_timezone():
     try:
         return ZoneInfo(DISPLAY_TIMEZONE)
     except Exception:
-        print(
-            f"Invalid timezone '{DISPLAY_TIMEZONE}'. "
-            "Falling back to UTC."
-        )
+        print(f"Invalid timezone {DISPLAY_TIMEZONE!r}; using UTC.")
         return timezone.utc
 
 
 def get_anime(status):
     print(f"Fetching AniList {status} list...")
-
     response = requests.post(
         ANILIST_API,
         json={
@@ -95,49 +80,27 @@ def get_anime(status):
         },
         timeout=30,
     )
-
-    print(
-        f"AniList response status: "
-        f"{response.status_code}"
-    )
-
-    if response.status_code != 200:
-        print(response.text)
-
+    print(f"AniList response status: {response.status_code}")
     response.raise_for_status()
 
     data = response.json()
-
-    if "errors" in data:
-        print(data["errors"])
+    if data.get("errors"):
         raise RuntimeError(str(data["errors"]))
 
-    lists = (
-        data["data"]
-        ["MediaListCollection"]
-        ["lists"]
-    )
-
-    anime = []
+    lists = data["data"]["MediaListCollection"]["lists"]
+    unique = {}
 
     for anime_list in lists:
         for entry in anime_list["entries"]:
-            media = entry["media"]
-
+            media = entry.get("media")
             if media:
-                anime.append(media)
-
-    unique = {}
-
-    for media in anime:
-        unique[media["id"]] = media
+                unique[media["id"]] = media
 
     return list(unique.values())
 
 
 def anime_title(media):
-    title = media["title"]
-
+    title = media.get("title") or {}
     return (
         title.get("userPreferred")
         or title.get("english")
@@ -148,162 +111,95 @@ def anime_title(media):
 
 def format_title(media):
     title = anime_title(media)
-
-    if media.get("siteUrl"):
-        return f"[{title}]({media['siteUrl']})"
-
-    return title
-
-
-def discord_relative_time(timestamp):
-    return f"<t:{timestamp}:R>"
+    url = media.get("siteUrl")
+    return f"[{title}]({url})" if url else title
 
 
 def is_today(timestamp, tz):
-    airing_date = datetime.fromtimestamp(
-        timestamp,
-        tz,
-    ).date()
-
-    today = datetime.now(tz).date()
-
-    return airing_date == today
-
-
-def get_planning():
-    return get_anime("PLANNING")
+    return (
+        datetime.fromtimestamp(timestamp, tz).date()
+        == datetime.now(tz).date()
+    )
 
 
 def get_aired_today(planning, now):
     tz = get_timezone()
-
-    aired_today = []
+    results = []
 
     for media in planning:
-        schedule = media.get("airingSchedule")
+        schedule = media.get("airingSchedule") or {}
+        for episode in schedule.get("nodes") or []:
+            aired_at = episode.get("airingAt")
+            number = episode.get("episode")
 
-        if not schedule:
-            continue
-
-        nodes = schedule.get("nodes") or []
-
-        for episode in nodes:
-            airing_at = episode.get("airingAt")
-            episode_number = episode.get("episode")
-
-            if not airing_at:
-                continue
-
-            if not episode_number:
-                continue
-
-            if airing_at > now:
-                continue
-
-            if not is_today(airing_at, tz):
-                continue
-
-            aired_today.append(
-                {
+            if (
+                aired_at
+                and number
+                and aired_at <= now
+                and is_today(aired_at, tz)
+            ):
+                results.append({
                     "media": media,
-                    "episode": episode_number,
-                    "airing_at": airing_at,
-                }
-            )
+                    "episode": number,
+                    "airing_at": aired_at,
+                })
 
-    aired_today.sort(
+    return sorted(
+        results,
         key=lambda item: item["airing_at"],
         reverse=True,
     )
 
-    return aired_today
-
 
 def get_upcoming(planning, now):
-    upcoming = []
+    results = []
 
     for media in planning:
-        next_episode = media.get(
-            "nextAiringEpisode"
-        )
-
-        if not next_episode:
+        episode = media.get("nextAiringEpisode")
+        if not episode:
             continue
 
-        airing_at = next_episode.get("airingAt")
-        episode_number = next_episode.get("episode")
+        aired_at = episode.get("airingAt")
+        number = episode.get("episode")
 
-        if not airing_at:
-            continue
-
-        if not episode_number:
-            continue
-
-        if airing_at <= now:
-            continue
-
-        upcoming.append(
-            {
+        if aired_at and number and aired_at > now:
+            results.append({
                 "media": media,
-                "episode": episode_number,
-                "airing_at": airing_at,
-            }
-        )
+                "episode": number,
+                "airing_at": aired_at,
+            })
 
-    upcoming.sort(
-        key=lambda item: item["airing_at"]
-    )
-
-    return upcoming
+    return sorted(results, key=lambda item: item["airing_at"])
 
 
 def make_entry(item):
-    media = item["media"]
-
     return (
-        f"**{format_title(media)}**\n"
+        f"**{format_title(item['media'])}**\n"
         f"Episode **{item['episode']}** · "
-        f"{discord_relative_time(item['airing_at'])}"
+        f"<t:{item['airing_at']}:R>"
     )
 
 
 def split_entries(entries):
-    """
-    Split entries into groups that fit inside
-    Discord's embed description limit.
-    """
-
     groups = []
-
     current = []
-    current_length = 0
+    length = 0
 
     for entry in entries:
-        separator_length = 2 if current else 0
+        extra = len(entry) + (2 if current else 0)
 
-        new_length = (
-            current_length
-            + separator_length
-            + len(entry)
-        )
-
-        if (
-            current
-            and new_length > MAX_DESCRIPTION_LENGTH
-        ):
+        if current and length + extra > MAX_DESCRIPTION_LENGTH:
             groups.append(current)
-
             current = []
-            current_length = 0
+            length = 0
+            extra = len(entry)
 
-            separator_length = 0
+        if len(entry) > MAX_DESCRIPTION_LENGTH:
+            entry = entry[:MAX_DESCRIPTION_LENGTH - 1] + "…"
+            extra = len(entry) + (2 if current else 0)
 
         current.append(entry)
-
-        current_length += (
-            separator_length
-            + len(entry)
-        )
+        length += extra
 
     if current:
         groups.append(current)
@@ -311,288 +207,237 @@ def split_entries(entries):
     return groups
 
 
-def build_embeds(
-    title,
-    description,
-    items,
-    empty_description,
-):
-    entries = [
-        make_entry(item)
-        for item in items
-    ]
-
-    # --------------------------------------------------------
-    # No entries
-    # --------------------------------------------------------
-
+def build_embeds(title, items, empty_text):
+    entries = [make_entry(item) for item in items]
     if not entries:
-        return [
-            {
-                "title": title,
-                "description": empty_description,
-                "footer": {
-                    "text": "Automatically updated • AniList"
-                },
-                "timestamp": datetime.now(
-                    timezone.utc
-                ).isoformat(),
-            }
-        ]
-
-    # --------------------------------------------------------
-    # Split into multiple embeds if necessary
-    # --------------------------------------------------------
+        entries = [empty_text]
 
     groups = split_entries(entries)
-
     embeds = []
+    item_index = 0
+    timestamp = datetime.now(timezone.utc).isoformat()
 
     for index, group in enumerate(groups, start=1):
-        if len(groups) == 1:
-            embed_title = title
-        else:
-            embed_title = (
-                f"{title} — Part {index}"
-            )
+        embed_title = (
+            title if len(groups) == 1
+            else f"{title} — Part {index}"
+        )
 
         embed = {
             "title": embed_title,
             "description": "\n\n".join(group),
-            "footer": {
-                "text": "Automatically updated • AniList"
-            },
-            "timestamp": datetime.now(
-                timezone.utc
-            ).isoformat(),
+            "footer": {"text": "Automatically updated • AniList"},
+            "timestamp": timestamp,
         }
 
-        # Cover image for the first anime in
-        # this particular embed.
-        media = items[
-            sum(len(group) for group in groups[:index - 1])
-        ]["media"]
-
-        image = (
-            media
-            .get("coverImage", {})
-            .get("medium")
-        )
-
-        if image:
-            embed["thumbnail"] = {
-                "url": image
-            }
+        if items and item_index < len(items):
+            media = items[item_index]["media"]
+            image = (media.get("coverImage") or {}).get("medium")
+            if image:
+                embed["thumbnail"] = {"url": image}
 
         embeds.append(embed)
+        item_index += len(group)
 
     return embeds
 
 
-def get_existing_message():
-    return os.environ.get(
-        "DISCORD_MESSAGE_ID",
-        "",
-    ).strip()
+def embed_text_size(embed):
+    size = len(embed.get("title", ""))
+    size += len(embed.get("description", ""))
+    size += len((embed.get("footer") or {}).get("text", ""))
+    size += len((embed.get("author") or {}).get("name", ""))
+
+    for field in embed.get("fields") or []:
+        size += len(field.get("name", ""))
+        size += len(field.get("value", ""))
+
+    return size
 
 
-def send_webhook(payload):
-    print("Sending new message to Discord...")
+def pack_messages(embeds):
+    messages = []
+    current = []
+    current_size = 0
 
-    url = WEBHOOK_URL
+    for embed in embeds:
+        size = embed_text_size(embed)
 
-    if "?" in url:
-        url += "&wait=true"
-    else:
-        url += "?wait=true"
+        if size > MAX_MESSAGE_TEXT:
+            raise ValueError(
+                f"Single embed exceeds safe limit: {size} characters"
+            )
 
-    response = requests.post(
-        url,
-        json=payload,
-        timeout=30,
-    )
+        if current and (
+            current_size + size > MAX_MESSAGE_TEXT
+            or len(current) >= MAX_EMBEDS_PER_MESSAGE
+        ):
+            messages.append(make_payload(current))
+            current = []
+            current_size = 0
 
-    print(
-        f"Discord response status: "
-        f"{response.status_code}"
-    )
+        current.append(embed)
+        current_size += size
 
-    if response.status_code == 429:
-        retry = response.json().get(
-            "retry_after",
-            2,
+    if current:
+        messages.append(make_payload(current))
+
+    return messages
+
+
+def make_payload(embeds):
+    return {
+        "username": "AniList Schedule",
+        "embeds": embeds,
+        "allowed_mentions": {"parse": []},
+    }
+
+
+def request_discord(method, url, **kwargs):
+    for attempt in range(6):
+        response = requests.request(
+            method, url, timeout=30, **kwargs
         )
 
-        print(
-            f"Rate limited. Waiting {retry} seconds..."
-        )
+        if response.status_code != 429:
+            return response
 
-        time.sleep(float(retry))
+        try:
+            delay = float(response.json().get("retry_after", 2))
+        except (ValueError, TypeError):
+            delay = 2
 
-        return send_webhook(payload)
+        print(f"Discord rate limited; waiting {delay} seconds.")
+        time.sleep(min(max(delay, 1), 60))
 
+    raise RuntimeError("Discord rate-limit retries exhausted.")
+
+
+def load_message_ids():
+    try:
+        with open(MESSAGE_IDS_FILE, encoding="utf-8") as file:
+            return json.load(file).get("message_ids", [])
+    except FileNotFoundError:
+        return []
+    except (json.JSONDecodeError, OSError) as error:
+        print(f"Could not read message IDs: {error}")
+        return []
+
+
+def save_message_ids(message_ids):
+    temporary = MESSAGE_IDS_FILE + ".tmp"
+    with open(temporary, "w", encoding="utf-8") as file:
+        json.dump({"message_ids": message_ids}, file, indent=2)
+    os.replace(temporary, MESSAGE_IDS_FILE)
+
+
+def send_message(payload):
+    separator = "&" if "?" in WEBHOOK_URL else "?"
+    url = WEBHOOK_URL + separator + "wait=true"
+
+    response = request_discord("POST", url, json=payload)
+    if not response.ok:
+        print("Discord error:", response.text)
     response.raise_for_status()
+    return response.json()["id"]
 
-    return response.json()
 
-
-def edit_webhook(message_id, payload):
-    print(
-        "Updating existing Discord message: "
-        f"{message_id}"
-    )
-
-    url = (
-        f"{WEBHOOK_URL}"
-        f"/messages/{message_id}"
-    )
-
-    response = requests.patch(
-        url,
-        json=payload,
-        timeout=30,
-    )
-
-    print(
-        f"Discord response status: "
-        f"{response.status_code}"
-    )
-
-    if response.status_code == 429:
-        retry = response.json().get(
-            "retry_after",
-            2,
-        )
-
-        print(
-            f"Rate limited. Waiting {retry} seconds..."
-        )
-
-        time.sleep(float(retry))
-
-        return edit_webhook(
-            message_id,
-            payload,
-        )
+def edit_message(message_id, payload):
+    url = f"{WEBHOOK_URL}/messages/{message_id}"
+    response = request_discord("PATCH", url, json=payload)
 
     if response.status_code == 404:
-        print(
-            "Existing Discord message "
-            "was not found."
-        )
-
         return False
 
     if not response.ok:
-        print(f"Discord error response: {response.text}")
+        print("Discord error:", response.text)
+    response.raise_for_status()
+    return True
+
+
+def delete_message(message_id):
+    url = f"{WEBHOOK_URL}/messages/{message_id}"
+    response = request_discord("DELETE", url)
+
+    if response.status_code in (200, 204, 404):
+        return
+
+    if not response.ok:
+        print("Could not delete old message:", response.text)
     response.raise_for_status()
 
-    return True
+
+def publish_messages(payloads):
+    old_ids = load_message_ids()
+    new_ids = []
+
+    for index, payload in enumerate(payloads):
+        if index < len(old_ids):
+            message_id = str(old_ids[index])
+            print(f"Updating message {index + 1}: {message_id}")
+
+            if edit_message(message_id, payload):
+                new_ids.append(message_id)
+                continue
+
+            print("Old message not found; creating replacement.")
+
+        message_id = str(send_message(payload))
+        print(f"Created message {index + 1}: {message_id}")
+        new_ids.append(message_id)
+
+    # Remove old schedule messages no longer needed.
+    for message_id in old_ids[len(payloads):]:
+        print(f"Deleting surplus schedule message: {message_id}")
+        delete_message(str(message_id))
+
+    save_message_ids(new_ids)
+    print(f"Saved {len(new_ids)} message IDs.")
 
 
 def main():
     print("=" * 48)
     print("AniList Discord Schedule")
     print("=" * 48)
-
     print(f"Username: {USERNAME}")
     print(f"Timezone: {DISPLAY_TIMEZONE}")
 
-    planning = get_planning()
-
-    print(
-        f"Found {len(planning)} planning anime."
-    )
-
+    planning = get_anime("PLANNING")
     now = int(time.time())
 
-    aired_today = get_aired_today(
-        planning,
-        now,
-    )
+    aired = get_aired_today(planning, now)
+    upcoming = get_upcoming(planning, now)
 
-    upcoming = get_upcoming(
-        planning,
-        now,
-    )
-
-    print(
-        f"Aired today: {len(aired_today)}"
-    )
-
-    print(
-        f"Upcoming: {len(upcoming)}"
-    )
-
-    aired_embeds = build_embeds(
-        "🔴 Aired",
-        "Episodes that aired today",
-        aired_today,
-        "No Planning anime aired today.",
-    )
-
-    upcoming_embeds = build_embeds(
-        "🟢 Upcoming",
-        "Next episodes from Planning",
-        upcoming,
-        "No upcoming episodes found in Planning.",
-    )
+    print(f"Found {len(planning)} planning anime.")
+    print(f"Aired today: {len(aired)}")
+    print(f"Upcoming: {len(upcoming)}")
 
     embeds = (
-        aired_embeds
-        + upcoming_embeds
-    )
-
-    payload = {
-        "username": "AniList Schedule",
-        "embeds": embeds,
-        "allowed_mentions": {
-            "parse": []
-        },
-    }
-
-    print(
-        f"Sending {len(embeds)} Discord embeds."
-    )
-
-    message_id = get_existing_message()
-
-    if message_id:
-        success = edit_webhook(
-            message_id,
-            payload,
+        build_embeds(
+            "🔴 Aired",
+            aired,
+            "No Planning anime aired today.",
         )
+        + build_embeds(
+            "🟢 Upcoming",
+            upcoming,
+            "No upcoming episodes found in Planning.",
+        )
+    )
 
-        if success:
-            print(
-                "Successfully updated Discord "
-                f"message: {message_id}"
-            )
-            return
+    payloads = pack_messages(embeds)
+    print(f"Built {len(embeds)} embeds across {len(payloads)} messages.")
 
+    for index, payload in enumerate(payloads, start=1):
+        size = sum(embed_text_size(e) for e in payload["embeds"])
         print(
-            "Existing message could not "
-            "be updated."
+            f"Message {index}: {len(payload['embeds'])} embeds, "
+            f"{size}/{MAX_MESSAGE_TEXT} characters"
         )
 
-        print(
-            "Creating a new Discord message..."
-        )
-
-    message = send_webhook(payload)
-
-    message_id = message["id"]
-
-    print(
-        f"Created message: {message_id}"
-    )
-
-    print(
-        "DISCORD_MESSAGE_ID="
-        f"{message_id}"
-    )
+    publish_messages(payloads)
+    print("Schedule updated successfully.")
 
 
 if __name__ == "__main__":
     main()
-
