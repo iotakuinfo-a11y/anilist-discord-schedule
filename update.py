@@ -418,12 +418,12 @@ def main():
 
     embeds = (
         build_embeds(
-            "🔴 Aired",
+            "🔴 Aired Recently",
             aired,
             "No Planning anime aired today.",
         )
         + build_embeds(
-            "🟢 Upcoming",
+            "🟢 Upcoming Episodes",
             upcoming,
             "No upcoming episodes found in Planning.",
         )
