@@ -28,98 +28,86 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Restore Discord message IDs
+      - name: Install dependencies
+        run: python -m pip install requests
+
+      - name: Restore message IDs
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPOSITORY: ${{ github.repository }}
           GH_RUN_ID: ${{ github.run_id }}
         run: |
           python - <<'PY'
-          import json
-          import os
-          import urllib.request
-          import urllib.error
-          import zipfile
           import io
+          import os
+          import zipfile
+          import requests
 
           repository = os.environ["GH_REPOSITORY"]
           current_run = int(os.environ["GH_RUN_ID"])
           token = os.environ["GH_TOKEN"]
 
-          api = f"https://api.github.com/repos/{repository}/actions/artifacts?per_page=100"
+          headers = {
+              "Authorization": f"Bearer {token}",
+              "Accept": "application/vnd.github+json",
+              "X-GitHub-Api-Version": "2022-11-28",
+          }
 
-          request = urllib.request.Request(
-              api,
-              headers={
-                  "Authorization": f"Bearer {token}",
-                  "Accept": "application/vnd.github+json",
-                  "X-GitHub-Api-Version": "2022-11-28",
-              },
+          api = f"https://api.github.com/repos/{repository}"
+
+          response = requests.get(
+              f"{api}/actions/artifacts?per_page=100",
+              headers=headers,
+              timeout=30,
           )
-
-          try:
-              with urllib.request.urlopen(request) as response:
-                  data = json.load(response)
-          except Exception as error:
-              print(f"Could not list artifacts: {error}")
-              raise
+          response.raise_for_status()
 
           artifacts = [
-              artifact for artifact in data.get("artifacts", [])
-              if artifact.get("name") == "discord-message-ids"
-              and not artifact.get("expired")
+              artifact
+              for artifact in response.json().get("artifacts", [])
+              if artifact["name"] == "discord-message-ids"
+              and not artifact["expired"]
               and artifact.get("workflow_run", {}).get("id") != current_run
           ]
 
-          artifacts.sort(
-              key=lambda artifact: artifact.get("created_at", ""),
-              reverse=True,
-          )
-
           if not artifacts:
               print("No previous message-ID artifact found; starting fresh.")
-              raise SystemExit(0)
+          else:
+              artifact = max(
+                  artifacts,
+                  key=lambda item: item["created_at"],
+              )
 
-          artifact_id = artifacts[0]["id"]
-          print(f"Restoring message IDs from artifact {artifact_id}")
+              print(
+                  f"Restoring message IDs from artifact {artifact['id']}"
+              )
 
-          download_url = (
-              f"https://api.github.com/repos/{repository}"
-              f"/actions/artifacts/{artifact_id}/zip"
-          )
+              download = requests.get(
+                  f"{api}/actions/artifacts/{artifact['id']}/zip",
+                  headers=headers,
+                  timeout=60,
+              )
+              download.raise_for_status()
 
-          request = urllib.request.Request(
-              download_url,
-              headers={
-                  "Authorization": f"Bearer {token}",
-                  "Accept": "application/vnd.github+json",
-              },
-          )
+              with zipfile.ZipFile(
+                  io.BytesIO(download.content)
+              ) as archive:
+                  try:
+                      content = archive.read(
+                          "discord_message_ids.json"
+                      )
+                  except KeyError:
+                      print(
+                          "Message-ID file not found; starting fresh."
+                      )
+                  else:
+                      with open(
+                          "discord_message_ids.json", "wb"
+                      ) as output:
+                          output.write(content)
 
-          with urllib.request.urlopen(request) as response:
-              archive_bytes = response.read()
-
-          with zipfile.ZipFile(io.BytesIO(archive_bytes)) as archive:
-              candidates = [
-                  name for name in archive.namelist()
-                  if name.endswith("discord_message_ids.json")
-              ]
-
-              if not candidates:
-                  print("Artifact contained no message-ID file; starting fresh.")
-                  raise SystemExit(0)
-
-              content = archive.read(candidates[0])
-              json.loads(content)
-
-              with open("discord_message_ids.json", "wb") as output:
-                  output.write(content)
-
-          print("Message IDs restored.")
+                      print("Message IDs restored successfully.")
           PY
-
-      - name: Install dependencies
-        run: python -m pip install requests
 
       - name: Run update.py
         env:
@@ -131,7 +119,7 @@ jobs:
           python -u update.py
           echo "Finished at: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
 
-      - name: Save Discord message IDs
+      - name: Upload message IDs
         if: success() && hashFiles('discord_message_ids.json') != ''
         uses: actions/upload-artifact@v4
         with:
