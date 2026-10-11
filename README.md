@@ -4,8 +4,8 @@ Automatically publishes your **AniList Planning anime schedule** to a Discord ch
 
 The workflow runs every **15 minutes** and displays episodes in two sections:
 
-- 🔴 **Aired** — episodes from your Planning list that aired today, using your configured timezone.
-- 🟢 **Upcoming** — the next episode for each Planning anime that is scheduled to air in the **next 24 hours**.
+- 🔴 **Aired Recently** — episodes from your Planning list that aired today, using your configured timezone.
+- 🟢 **Upcoming Episodes** — the next episode for each Planning anime that is scheduled to air in the **next 24 hours**.
 
 ## Features
 
